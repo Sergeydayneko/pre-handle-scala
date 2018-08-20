@@ -1,13 +1,14 @@
-package database
+package ru.dayneko.database
 
 import com.typesafe.config.{Config, ConfigFactory}
 import org.slf4j.{Logger, LoggerFactory}
 import redis.clients.jedis.{JedisPool, JedisPoolConfig}
-import utils.KeyVariables._
-import utils.KeysRepository._
+import ru.dayneko.model.Rule
+import ru.dayneko.utils.KeysRepository._
+
 
 /**
-  * Created by s.dayneko 03.07.2018
+  * Created by Dayneko 03.07.2018
   */
 object Redis {
   val log: Logger    = LoggerFactory.getLogger(this.getClass)
@@ -20,59 +21,54 @@ object Redis {
 
   log.info(s"Connecting to Redis. HOST = $host, PORT = $port, DB Number = $db")
 
-  /**
-    * Save data from request
-    * @param phcId - phc value
-    * @param webId - web value
-    * @param wsId - ws number
-    * @return status of addition
-    */
-  def saveData(phcId: Option[String], webId: Option[String], wsId: String): Unit = {
+  def saveData(key: String, duration: Int, count: String): Unit = {
     val redis = pool.getResource
-    log.info("Database pool has been successfully open for saving new number(dataSave method)")
+    log.info("Database pool has been successfully open for saving new number(saveContact method)")
     try {
-      webId.filter(_.nonEmpty).map(key(_, webPrefix, wsId)).foreach(k => {
-        log.info("Saving number by web_key, ID of new key = {} , the time of existence = {}", k, exp_time_web)
-        redis.setex(k, exp_time_web.toInt, curDate)
-      })
-      phcId.filter(_.nonEmpty).map(key(_, phcPrefix, wsId)).foreach(k => {
-        log.info("Saving number by phc_key, ID of new key = {} , the time of existence = {}", k, exp_time_phc)
-        redis.setex(k, exp_time_phc.toInt, curDate)
-      })
+      Some(key).filter(_.nonEmpty).foreach(redis.setex(_, duration, count))
+      log.info("Key {} has been successfully added to black list", key)
     } catch {
       case e: Exception =>
-        log.warn("Exceptional situation in dataSave method", e)
+        log.warn("Exceptional situation in saveContact method", e)
         throw e
     } finally {
       redis.close()
     }
   }
 
-  /**
-    * Check data retention in buffer
-    * @param phcId - phc value
-    * @param wsId - ws value
-    * @param webId - web number
-    * @return status of data in buffer
-    */
-  def checkData(phcId: Option[String], webId: Option[String], wsId: String): Option[Int] = {
+
+  def checkData(key: String, rule: Rule): dbResult = {
     val redis = pool.getResource
-    log.info("Database pool has been successfully open for number checking(dataCheck method)")
+    log.info("Database pool has been successfully open for number checking(checkContact method)")
     try {
-      webId.filter(c => redis.exists(key(c, webPrefix, wsId))).map(s => {
-        log.info("Found a match by web_key = {}, number of response = {}", s, web_conflict)
-        web_conflict
-      }).orElse(
-      phcId.filter(c => redis.exists(key(c, phcPrefix, wsId))).map(s => {
-        log.info("Found a match by phc_key = {}, number of response  = {}", s, phc_conflict)
-        phc_conflict
-      }))
+      Some(key).map(k => {
+        if (redis.exists(k) && redis.get(k).toInt >= rule.counter) {
+          log.info("Key {} already exists in black list", k)
+          Lock(rule.status)
+        }
+        else if (redis.exists(k)) {
+          redis.setex(k, rule.duration, (redis.get(k).toInt + 1).toString)
+          log.info("Key {} has counter value less than in configuration and has been iterated by 1", k)
+          NotLock()
+        }
+        else {
+          redis.setex(k, rule.duration, "1")
+          log.info("Key {} doesn't exist in database and has been added successfully with counter = 1", k)
+          NotLock()
+        }
+      }).getOrElse(LockServerError(errorCode))
+
     } catch {
       case e: Exception =>
-        log.warn("Exceptional situation in dataCheck method", e)
+        log.warn("Exceptional situation in checkData method", e)
         throw e
     } finally {
       redis.close()
     }
   }
 }
+
+sealed abstract class dbResult
+case class Lock(statusCode: Int) extends dbResult
+case class NotLock() extends dbResult
+case class LockServerError(statusCode: Int) extends dbResult
